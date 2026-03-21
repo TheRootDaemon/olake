@@ -2,6 +2,8 @@ package driver
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"math"
 	"net"
@@ -70,7 +72,6 @@ func (m *Mongo) CDCSupported() bool {
 }
 
 func (m *Mongo) Setup(ctx context.Context) error {
-
 	if m.config.SSHConfig != nil && m.config.SSHConfig.Host != "" {
 		logger.Info("Found SSH Configuration")
 		sshClient, err := m.config.SSHConfig.SetupSSHConnection()
@@ -83,6 +84,16 @@ func (m *Mongo) Setup(ctx context.Context) error {
 	opts := options.Client()
 
 	opts.ApplyURI(m.config.URI())
+
+	if m.config.TLSConfig.Mode != "" && m.config.TLSConfig.Mode != "disable" {
+		tlsConfig, err := m.BuildTLSConfig()
+		if err != nil {
+			return err
+		}
+
+		opts.SetTLSConfig(tlsConfig)
+	}
+
 	opts.SetCompressors([]string{"snappy"}) // using Snappy compression; read here https://en.wikipedia.org/wiki/Snappy_(compression)
 	if m.sshDialer != nil {
 		opts.SetDialer(m.sshDialer)
@@ -110,6 +121,30 @@ func (m *Mongo) Setup(ctx context.Context) error {
 	defer cancel()
 
 	return m.client.Ping(pingCtx, options.Client().ReadPreference)
+}
+
+func (m *Mongo) BuildTLSConfig() (*tls.Config, error) {
+	cfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	if m.config.TLSConfig.ServerCA != "" {
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM([]byte(m.config.TLSConfig.ServerCA)) {
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+		cfg.RootCAs = caCertPool
+	}
+
+	if m.config.TLSConfig.ClientCert != "" && m.config.TLSConfig.ClientKey != "" {
+		cert, err := tls.X509KeyPair([]byte(m.config.TLSConfig.ClientCert), []byte(m.config.TLSConfig.ClientKey))
+		if err != nil {
+			return nil, fmt.Errorf("failed to load client certificate/key: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{cert}
+	}
+
+	return cfg, nil
 }
 
 func (m *Mongo) Close(ctx context.Context) error {
